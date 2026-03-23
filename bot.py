@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from telegram import Update
@@ -18,36 +18,35 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-API_ENDPOINT = "https://addy-chatgpt-api.vercel.app/"
+API_ENDPOINT = "https://addy-chatgpt-api.vercel.app/?text="
 MEMORY_DIR = Path("json")
-MAX_HISTORY = 18
-MAX_REPLY_CHARS = 650
+MAX_HISTORY = 12
+MAX_REPLY_CHARS = 420
 CLEAR_INTERVAL_SECONDS = 10
 
 SYSTEM_PROMPT = """
-You are a smooth, friendly Telegram chatbot.
+You are a smooth Telegram chatbot.
 
-STYLE:
-- Medium replies only: usually 2 to 5 short paragraphs or a few sentences
-- Warm, natural, and slightly playful
-- Light flirt is allowed only in a safe, respectful way
-- Never explicit, sexual, creepy, manipulative, or obsessive
-- Do not overtalk or explain too much
-- Use casual human language
-- Add emojis sparingly
+Style:
+- Short, natural, and friendly
+- Slightly flirty sometimes, but always respectful
+- Keep replies brief: 1 to 3 short paragraphs max
+- Sound human, not robotic
+- Use emojis lightly, not too much
 
-BEHAVIOR:
-- Use the recent chat history to stay consistent
-- If the user is serious, respond seriously
-- If the user is casual, stay relaxed and friendly
+Behavior:
+- Reply based on recent chat history
+- If the user is serious, answer seriously
+- If the user is casual, be chill and playful
 - If the user asks a direct question, answer directly
-- Ask at most one short follow-up question when it helps
-- Avoid repeating the same phrases
+- Ask at most one short follow-up question when needed
 
-IMPORTANT:
-- Keep responses concise and useful
-- Sound like a real chat partner
-"""
+Rules:
+- No explicit, sexual, creepy, manipulative, or obsessive content
+- No long explanations unless the user asks
+- Avoid repeating the same phrases
+- Keep it concise and engaging
+""".strip()
 
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
@@ -134,7 +133,79 @@ def build_prompt(history: List[Dict[str, Any]], user_text: str) -> str:
     return "\n".join(lines)
 
 
+def recursive_find_text(obj: Any) -> Optional[str]:
+    if isinstance(obj, str):
+        stripped = obj.strip()
+        return stripped if stripped else None
+
+    if isinstance(obj, dict):
+        priority_keys = (
+            "response",
+            "result",
+            "message",
+            "text",
+            "answer",
+            "reply",
+            "output",
+            "content",
+            "data",
+            "choices",
+        )
+
+        for key in priority_keys:
+            if key in obj:
+                found = recursive_find_text(obj[key])
+                if found:
+                    return found
+
+        for value in obj.values():
+            found = recursive_find_text(value)
+            if found:
+                return found
+
+    if isinstance(obj, list):
+        for item in obj:
+            found = recursive_find_text(item)
+            if found:
+                return found
+
+    return None
+
+
+def clean_reply(text: str) -> str:
+    text = (text or "").strip()
+
+    if not text:
+        return "Hmm, say that a little differently 😌"
+
+    # Remove obvious JSON-looking wrappers if they sneak through
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            parsed = json.loads(text)
+            extracted = recursive_find_text(parsed)
+            if extracted:
+                text = extracted
+        except Exception:
+            pass
+
+    if text.startswith('"') and text.endswith('"'):
+        text = text[1:-1].strip()
+
+    if len(text) > MAX_REPLY_CHARS:
+        cut = text[:MAX_REPLY_CHARS]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        text = cut + "..."
+
+    return text
+
+
 def call_api(prompt: str) -> str:
+    """
+    Tries hard to avoid leaking raw JSON.
+    If the endpoint returns a structured payload, we search for usable text.
+    If it returns nothing useful, we fall back to a short safe reply.
+    """
     try:
         response = requests.get(
             API_ENDPOINT,
@@ -143,56 +214,41 @@ def call_api(prompt: str) -> str:
         )
         response.raise_for_status()
 
+        raw_text = (response.text or "").strip()
+
+        # First try JSON parsing
         try:
             data = response.json()
-            if isinstance(data, dict):
-                for key in ("response", "result", "message", "text", "answer", "data"):
-                    value = data.get(key)
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
+            extracted = recursive_find_text(data)
+            if extracted and extracted != prompt:
+                return extracted
         except Exception:
             pass
 
-        return (response.text or "").strip()
+        # If plain text and not a JSON echo, use it
+        if raw_text:
+            if raw_text.startswith("{") and raw_text.endswith("}"):
+                try:
+                    parsed = json.loads(raw_text)
+                    extracted = recursive_find_text(parsed)
+                    if extracted and extracted != prompt:
+                        return extracted
+                except Exception:
+                    pass
+            if raw_text != prompt:
+                return raw_text
+
+        return "I’m here 😌 say that another way and I’ll answer properly."
 
     except Exception as exc:
         logger.error("API call failed: %s", exc)
-        return "Hmm, I had a small issue replying. Try again in a moment 🙂"
+        return "Hmm, I hit a small issue. Try again in a sec 🙂"
 
 
-def trim_reply(text: str) -> str:
-    text = (text or "").strip()
-    if not text:
-        return "Say that again a little differently 😌"
-
-    if len(text) > MAX_REPLY_CHARS:
-        cut = text[:MAX_REPLY_CHARS]
-        if " " in cut:
-            cut = cut.rsplit(" ", 1)[0]
-        text = cut + "..."
-    return text
-
-
-def is_mentioned(update: Update, bot_username: str | None) -> bool:
-    if not bot_username:
+def is_mentioned(message_text: str, bot_username: Optional[str]) -> bool:
+    if not message_text or not bot_username:
         return False
-
-    message = update.effective_message
-    if not message or not message.text:
-        return False
-
-    text = message.text.lower()
-    uname = f"@{bot_username.lower()}"
-    if uname in text:
-        return True
-
-    for entity in message.entities or []:
-        if entity.type == "mention":
-            mention_text = message.text[entity.offset : entity.offset + entity.length]
-            if mention_text.lower() == uname:
-                return True
-
-    return False
+    return f"@{bot_username.lower()}" in message_text.lower()
 
 
 async def typing_loop(chat, stop_event: asyncio.Event) -> None:
@@ -202,7 +258,7 @@ async def typing_loop(chat, stop_event: asyncio.Event) -> None:
         except Exception:
             pass
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=3.5)
+            await asyncio.wait_for(stop_event.wait(), timeout=3)
         except asyncio.TimeoutError:
             continue
 
@@ -210,14 +266,15 @@ async def typing_loop(chat, stop_event: asyncio.Event) -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Hey 😌\n"
-        "I’m here for smooth chat, replies, and light flirting — kept respectful.\n"
-        "Mention me, reply to me, or message me privately."
+        "Talk to me in private, mention me, or reply to one of my messages."
     )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Use /reset to clear this chat memory.\n"
+        "Commands:\n"
+        "/start - intro\n"
+        "/reset - clear chat memory\n\n"
         "I reply in private chats, when mentioned, or when you reply to my message."
     )
 
@@ -229,7 +286,7 @@ async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         path.unlink(missing_ok=True)
     except Exception as exc:
         logger.warning("Reset failed for %s: %s", chat_id, exc)
-    await update.message.reply_text("Memory cleared for this chat ✨")
+    await update.message.reply_text("Memory cleared ✨")
 
 
 async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -239,25 +296,26 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     chat = update.effective_chat
     bot_username = getattr(context.bot, "username", None)
+    bot_id = context.bot.id
 
     should_reply = False
 
     if chat.type == "private":
         should_reply = True
     elif message.reply_to_message and message.reply_to_message.from_user:
-        if message.reply_to_message.from_user.id == context.bot.id:
+        if message.reply_to_message.from_user.id == bot_id:
             should_reply = True
-    elif is_mentioned(update, bot_username):
+    elif is_mentioned(message.text, bot_username):
         should_reply = True
 
     if not should_reply:
         return
 
-    chat_id = chat.id
     user_text = message.text.strip()
     if not user_text:
         return
 
+    chat_id = chat.id
     history = load_history(chat_id)
     prompt = build_prompt(history, user_text)
 
@@ -268,7 +326,7 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         reply = await asyncio.to_thread(call_api, prompt)
-        reply = trim_reply(reply)
+        reply = clean_reply(reply)
         add_history(chat_id, "assistant", reply)
         await message.reply_text(reply)
     finally:
@@ -298,7 +356,11 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
 
     if app.job_queue is not None:
-        app.job_queue.run_repeating(auto_clear_job, interval=CLEAR_INTERVAL_SECONDS, first=CLEAR_INTERVAL_SECONDS)
+        app.job_queue.run_repeating(
+            auto_clear_job,
+            interval=CLEAR_INTERVAL_SECONDS,
+            first=CLEAR_INTERVAL_SECONDS,
+        )
     else:
         logger.warning("JobQueue not available; auto-clear disabled.")
 
