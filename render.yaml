@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: ai-chatbot-web
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn web:app"
+    plan: free
+
+  - type: worker
+    name: ai-chatbot-bot
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    plan: free

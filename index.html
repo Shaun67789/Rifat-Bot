@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Chat</title>
+  <style>
+    :root{
+      --bg:#0f172a;
+      --card:#111827;
+      --bot:#22c55e;
+      --user:#3b82f6;
+      --text:#e5e7eb;
+      --muted:#94a3b8;
+      --border:#1f2937;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family:Arial, sans-serif;
+      background:linear-gradient(180deg,#020617 0%, #0f172a 100%);
+      color:var(--text);
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:20px;
+    }
+    .app{
+      width:min(900px,100%);
+      background:rgba(17,24,39,.92);
+      border:1px solid var(--border);
+      border-radius:22px;
+      box-shadow:0 20px 60px rgba(0,0,0,.35);
+      overflow:hidden;
+    }
+    .top{
+      padding:18px 20px;
+      border-bottom:1px solid var(--border);
+    }
+    h2{margin:0 0 6px 0}
+    p{margin:0;color:var(--muted)}
+    #chat{
+      height:65vh;
+      overflow:auto;
+      padding:18px;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+    .msg{
+      max-width:75%;
+      padding:12px 14px;
+      border-radius:16px;
+      line-height:1.4;
+      white-space:pre-wrap;
+      word-wrap:break-word;
+    }
+    .user{
+      background:var(--user);
+      align-self:flex-end;
+      border-bottom-right-radius:6px;
+    }
+    .bot{
+      background:var(--bot);
+      color:#04130a;
+      align-self:flex-start;
+      border-bottom-left-radius:6px;
+    }
+    .composer{
+      display:flex;
+      gap:10px;
+      padding:16px;
+      border-top:1px solid var(--border);
+      background:rgba(15,23,42,.5);
+    }
+    input{
+      flex:1;
+      border:1px solid var(--border);
+      background:#0b1220;
+      color:var(--text);
+      padding:14px 16px;
+      border-radius:14px;
+      outline:none;
+      font-size:16px;
+    }
+    button{
+      border:none;
+      background:#6366f1;
+      color:white;
+      padding:0 18px;
+      border-radius:14px;
+      font-size:16px;
+      cursor:pointer;
+    }
+    button:disabled{
+      opacity:.7;
+      cursor:not-allowed;
+    }
+    .typing{
+      opacity:.8;
+      font-style:italic;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="top">
+      <h2>AI Chat 😌</h2>
+      <p>Simple web chat powered by the same AI endpoint</p>
+    </div>
+
+    <div id="chat"></div>
+
+    <div class="composer">
+      <input id="input" placeholder="Type a message..." autocomplete="off" />
+      <button id="sendBtn" onclick="sendMsg()">Send</button>
+    </div>
+  </div>
+
+  <script>
+    const chat = document.getElementById("chat");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("sendBtn");
+
+    function add(text, type) {
+      const div = document.createElement("div");
+      div.className = "msg " + type;
+      div.innerText = text;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+      return div;
+    }
+
+    async function sendMsg() {
+      const msg = input.value.trim();
+      if (!msg) return;
+
+      sendBtn.disabled = true;
+      input.value = "";
+      add(msg, "user");
+      const typing = add("typing...", "bot typing");
+
+      try {
+        const res = await fetch("/chat", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({message: msg})
+        });
+        const data = await res.json();
+        typing.innerText = data.reply || "No reply";
+      } catch (e) {
+        typing.innerText = "Error 😅";
+      } finally {
+        sendBtn.disabled = false;
+        input.focus();
+      }
+    }
+
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") sendMsg();
+    });
+  </script>
+</body>
+</html>
